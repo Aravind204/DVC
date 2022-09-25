@@ -1,0 +1,16 @@
+L=0.5e-6;
+DCM_en=0;
+C=200e-6;
+T=1e-6;
+V_d=0.55;
+r_L=5e-3;
+r_C=3e-3;
+Vin=12;
+r_1=5e-3;
+r_2=5e-3;
+Vref=1;
+r_d=10e-3;
+Io_max=20;
+V0_int=12;
+I_L_int=0;
+V_C_int=0;
