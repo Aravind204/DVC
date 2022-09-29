@@ -1,0 +1,173 @@
+module Digital_VMC(adc_data,Q_load,clk,pwm_high,pwm_low,Q_LR_tran,adc_clk,dac_clk,dac_data);
+input clk,Q_LR_tran;
+input signed [9:0] adc_data;
+output adc_clk,dac_clk,pwm_high,pwm_low,Q_load;
+output [11:0] dac_data;
+reg signed [9:0] N_out;
+wire signed[9:0] N_e;
+wire signed[18:0] N_con;
+wire f_pwm;
+parameter K_p=10'sb0001_010000;//Q4.6
+parameter K_i=10'sb0_001000011;//Q1.9
+parameter K_d=10'sb0111_11111;//Q2.8
+parameter N_ref_nom=10'sb0_010001010;// nominal value for reference
+parameter delta_N_ref=10'sb0_000001110;// When transient given in the input
+wire signed [9:0] N_ref;
+reg signed [9:0] N_ref_temp;
+always@(posedge f_pwm)
+begin
+N_out<={adc_data[9:1],1'b0};// Q1.9
+end  
+// clock generator switching clock 200kHz,adc and dac clock frequency 25MHz,normal clock frequency of fpga 100MHz
+clock_generator u1(.f_clk(clk),.f_adc_clock(adc_clk),.f_dac_clock(dac_clk),.f_sw(f_pwm));
+// Creating PID controller 
+digital_PID_controller pid1(.f_pwm(f_pwm),.N_er(N_e),.N_con(N_con),.Kp(K_p),.Ki(K_i),.Kd(K_d));
+// switching pluses generation and dead time generation
+DPWM_dead_time_circuit u6(.clk(clk),.f_pwm(f_pwm),.cont_out(N_con),.Q_H(pwm_high),.Q_L(pwm_low));
+// Creating transient events
+parameter N_tran=100;
+reg counter1;
+reg Q_tran;
+wire Q_tran_type;// If transient is load transient then Q_tran_type 0 if transient is input transient then Q_tran_type 1
+assign Q_tran_type=Q_LR_tran;
+always @(posedge f_pwm) 
+begin
+if(counter1<=N_tran/2)begin
+Q_tran<=0;
+N_ref_temp<=N_ref_nom;
+counter1<=counter1+1;
+end
+else if(counter1==N_tran)begin
+Q_tran<=0;
+N_ref_temp<=N_ref_nom;
+counter1<=0;
+end
+else begin
+Q_tran<=1;
+N_ref_temp<=N_ref_nom+delta_N_ref;
+counter1<=counter1+1;
+end
+end
+assign Q_load=Q_tran_type?0:Q_tran;
+assign N_ref=Q_tran_type?N_ref_temp:N_ref_nom;
+assign dac_data=12'b0;
+endmodule
+module  clock_generator(f_clk,f_adc_clock,f_dac_clock,f_sw);
+input f_clk;//clock frequency=100MHz
+output reg f_adc_clock,f_dac_clock,f_sw;
+parameter N_sw=499;//switch clock frequency 200kHz
+parameter N_adc=3;//ADC clock frequency 25MHz
+reg [9:0] counter1,counter2;
+initial
+begin
+counter1=0;
+counter2=0;
+end
+always@(posedge f_clk) begin
+if (counter1<=10)begin
+f_sw<=1;
+counter1<=counter1+1;
+end
+else if(counter1==N_sw)begin
+f_sw<=1;
+counter1<=0;
+end
+else begin
+f_sw<=0;
+counter1=counter1+1;
+end
+end
+always@(posedge f_clk)begin
+if (counter2<=0)begin
+f_adc_clock<=0;
+f_dac_clock<=0;
+counter2<=counter1+2;
+end
+else if(counter2==N_adc)begin
+f_adc_clock<=1;
+f_dac_clock<=1;
+counter2<=0;
+end
+else begin
+f_adc_clock<=0;
+f_dac_clock<=0;
+counter2<=counter2+1;
+end
+end
+endmodule
+module digital_PID_controller(f_pwm,N_er,N_con,Kp,Ki,Kd);
+input f_pwm;
+input signed [9:0] N_er,Kp,Ki,Kd;
+output signed [18:0] N_con;
+wire signed [19:0] N_prop_temp,N_int_temp1;
+reg signed [19:0] N_der_temp;
+wire signed [18:0] N_prop,N_int_temp2,N_int_inst,N_der;
+reg signed [18:0] N_int;
+reg signed [9:0]  N_er_prev;
+reg signed [18:0] N_int_temp3,N_int_temp4;
+parameter u_int_max=19'sb0_111111111111111110;
+assign N_prop_temp=Kp*N_er;
+assign N_int_temp1=Ki*N_er;
+always@(posedge f_pwm)begin
+N_der_temp=Kd*(N_er-N_er_prev);
+N_er_prev=N_er;
+end
+assign N_prop ={N_prop_temp[18:0]}; //Q4.15
+assign N_int_temp2={N_int_temp1[18:0]};//Q1.18
+assign N_der={N_der_temp[18:0]};//Q4.15
+always @ (posedge f_pwm)begin
+N_int_temp4= N_int_temp2+N_int_temp3;
+N_int_temp3=N_int_temp4;
+end
+assign N_int_inst={N_int_temp4[18],N_int_temp4[18],N_int_temp4[18],{N_int_temp4[18:3]}};
+always @(posedge f_pwm)begin
+if(N_int_inst>u_int_max)
+N_int<=u_int_max;
+else
+N_int<=N_int_inst;
+end
+assign N_con=N_prop+N_int+N_der;
+endmodule
+module DPWM_dead_time_circuit(clk,f_pwm,cont_out,Q_H,Q_L);
+input clk,f_pwm;
+input signed [18:0] cont_out;//Q4.15
+output Q_H,Q_L;
+wire rst;
+reg q_pwm;
+reg [7:0] shift=0;
+reg pwm_delay;
+wire signed [11:0] controller_output;
+reg signed [11:0] counter;//Q4.8
+assign controller_output={cont_out[18:7]};
+initial
+  counter=0;
+always@(posedge clk)begin
+if(counter<=1)begin
+q_pwm<=1;
+counter=counter+1;
+end
+else if(counter<=controller_output)begin
+q_pwm<=1;
+counter=counter+1;
+end
+else if(counter==499)begin
+q_pwm<=0;
+counter=0;
+end
+else begin
+q_pwm<=0;
+counter=counter+1;
+end
+end
+always@(posedge clk)
+begin
+shift[0]<=q_pwm;
+shift[1]<=shift[0];
+shift[2]<=shift[1];
+shift[3]<=shift[2];
+shift[4]<=shift[3];
+pwm_delay<=shift[4];
+end
+assign Q_H= q_pwm & pwm_delay;
+assign Q_L= ~(q_pwm | pwm_delay);
+endmodule
